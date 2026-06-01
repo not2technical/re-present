@@ -23,17 +23,19 @@ export async function POST(req: NextRequest) {
         : deck.slides.filter((s) => !s.converted);
 
     for (const slide of targets) {
-      const blocks = await convertSlide(slide);
-      // Paint out baked-in text on solid regions so the editable text sits on
-      // a clean background with no "double text". Keep the original for compare.
+      const { textBlocks, imageElements } = await convertSlide(slide);
+      // Repaint clean containers + paint out baked text so the editable text
+      // sits on a clean background with no doubling. Keep the original for
+      // compare/restore.
       const original = slide.originalBackground ?? slide.background;
       const { background, blocks: cleaned } = await cleanBackground(
         original,
-        blocks
+        textBlocks
       );
       slide.originalBackground = original;
       slide.background = background;
       slide.textBlocks = cleaned;
+      slide.imageElements = imageElements;
       slide.converted = true;
     }
 

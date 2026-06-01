@@ -10,6 +10,20 @@ export type Bbox = {
   h: number;
 };
 
+// A visual container the text sits inside (a chip, button, glow box, callout).
+// Captured so we can REPAINT a clean version over the baked original — removing
+// the original text without smearing the box — and re-render it crisply.
+export type Container = {
+  // Box geometry, normalized 0..1. Usually slightly larger than the text bbox.
+  bbox: Bbox;
+  fill: string | null; // interior color, null = transparent (text only)
+  borderColor: string | null;
+  borderWidth: number; // px relative to source height; 0 = none
+  radius: number; // corner radius in px relative to source height
+  // Soft outer glow color (e.g. neon UI). null = none.
+  glow: string | null;
+};
+
 export type TextBlock = {
   id: string;
   text: string;
@@ -23,6 +37,19 @@ export type TextBlock = {
   align: "left" | "center" | "right";
   // Optional fill behind the text (for chips/labels). null = transparent.
   fill: string | null;
+  // Optional container (box/chip/glow) the text lives in. Repainted on the
+  // cleaned background and re-rendered in editor/export for crisp fidelity.
+  container?: Container | null;
+};
+
+// A non-text image/graphic region the user may remove in the editor.
+export type ImageElement = {
+  id: string;
+  bbox: Bbox;
+  // What to paint when the user removes it: sampled surrounding color, or
+  // null to diffusion-fill from neighbors.
+  fillColor: string | null;
+  label?: string; // short description from vision (e.g. "robot mascot")
 };
 
 export type Slide = {
@@ -38,6 +65,8 @@ export type Slide = {
   width: number; // pixels of the source image
   height: number;
   textBlocks: TextBlock[];
+  // Removable non-text graphic regions detected by vision.
+  imageElements?: ImageElement[];
   // Raw text harvested directly from the source (if any), used as a hint
   // and as a fallback when vision is unavailable.
   sourceText?: string;

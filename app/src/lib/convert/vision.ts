@@ -1,11 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { v4 as uuid } from "uuid";
-import type { Slide, TextBlock } from "../types";
+import type { Slide, TextBlock, Container, ImageElement } from "../types";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-8";
 
 // System prompt is static across all slides -> prompt-cached to cut cost/latency.
-const SYSTEM_PROMPT = `You are a meticulous presentation-digitization engine. You receive ONE rendered slide image and must reconstruct its editable text layer with extreme positional and stylistic accuracy.
+const SYSTEM_PROMPT = `You are a meticulous presentation-digitization engine. You receive ONE rendered slide image and must reconstruct it as editable layers with extreme positional and stylistic accuracy. The goal: every piece of text becomes editable, baked-in text is cleanly removed, and the look is faithfully rebuilt.
 
 Return ONLY a JSON object (no markdown fences, no prose) matching exactly:
 {
@@ -21,25 +21,78 @@ Return ONLY a JSON object (no markdown fences, no prose) matching exactly:
       "bold": boolean,
       "italic": boolean,
       "underline": boolean,
-      "color": string,           // hex, e.g. "#1a1a1a"
+      "color": string,           // hex of the TEXT color, e.g. "#1a1a1a"
       "align": "left"|"center"|"right",
-      "fill": string|null        // hex of a solid background chip behind text, else null
+      "fill": string|null,       // hex of a solid chip color directly behind the text, else null
+      "container": null | {      // a box/button/chip/glow-frame the text sits INSIDE, else null
+        "x": number, "y": number, "w": number, "h": number,  // box bounds, fractions 0..1
+        "fill": string|null,        // interior color of the box, null if transparent
+        "borderColor": string|null, // border/stroke color, null if none
+        "borderWidth": number,      // border thickness in px on a 720px-tall slide, 0 if none
+        "radius": number,           // corner radius in px on a 720px-tall slide, 0 if square
+        "glow": string|null         // soft neon outer-glow color, null if none
+      }
+    }
+  ],
+  "imageElements": [             // non-text graphics a user might want to delete
+    {
+      "x": number, "y": number, "w": number, "h": number, // bounds, fractions 0..1
+      "label": string,           // short description, e.g. "robot mascot", "logo", "chart"
+      "fillColor": string|null   // solid color of the area immediately around it, null if textured
     }
   ]
 }
 
-Rules:
+Rules for TEXT:
 - Capture EVERY distinct text element: titles, body, bullets, captions, labels, footers, page numbers.
-- Group text that visually belongs to one paragraph/box into a single block; keep separate headings/bullets separate.
-- Bounding boxes must tightly wrap the visible text. Be precise — these positions overlay the original image.
-- Estimate fontSize from the text height relative to the slide height (slide is 720pt tall).
-- Read colors from the actual pixels. Match alignment to how text sits in its box.
-- Do NOT transcribe text baked into photos/logos/charts unless it is a real readable label.
-- If the slide has no text, return {"textBlocks": []}.`;
+- Group text that visually belongs to one line/paragraph into a single block; keep separate headings/bullets separate.
+- Bounding boxes must TIGHTLY wrap the visible text. These positions overlay the slide, so precision matters.
+- Estimate fontSize from text height relative to slide height (slide is 720pt tall).
+- Read the TEXT color from the actual glyph pixels (not the box).
+
+Rules for CONTAINER (critical for fidelity):
+- If text sits inside a visible box, button, pill/chip, callout, or glowing frame, fill in "container" with that box's geometry and colors. The box is usually a bit larger than the text.
+- "fill" is the box INTERIOR color (what's behind the text). "borderColor"/"borderWidth" describe the outline. "radius" is corner rounding. "glow" is any soft neon halo color around the box.
+- If text is just on the plain slide background with no distinct box, set "container": null.
+- This lets us repaint a clean box and remove the original baked text/box underneath — so be accurate about colors.
+
+Rules for IMAGE ELEMENTS:
+- List distinct NON-TEXT graphics that a user might delete: photos, illustrations, mascots, logos, icons, decorative shapes, charts. One entry per distinct object.
+- Do NOT list the whole-slide background, gradients, or container boxes (those are handled above).
+- "fillColor" = the solid color immediately surrounding the object if uniform, else null.
+
+If the slide has no text, return {"textBlocks": [], "imageElements": [...]}.`;
 
 function clamp01(n: number): number {
   if (typeof n !== "number" || Number.isNaN(n)) return 0;
   return Math.max(0, Math.min(1, n));
+}
+
+function hexOrNull(v: unknown): string | null {
+  return typeof v === "string" && /^#[0-9a-fA-F]{3,8}$/.test(v) ? v : null;
+}
+
+function normalizeContainer(raw: unknown): Container | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  const fill = hexOrNull(c.fill);
+  const borderColor = hexOrNull(c.borderColor);
+  const glow = hexOrNull(c.glow);
+  // A container with no visible styling is meaningless — treat as none.
+  if (!fill && !borderColor && !glow) return null;
+  return {
+    bbox: {
+      x: clamp01(Number(c.x)),
+      y: clamp01(Number(c.y)),
+      w: clamp01(Number(c.w)) || 0.2,
+      h: clamp01(Number(c.h)) || 0.08,
+    },
+    fill,
+    borderColor,
+    borderWidth: Math.max(0, Math.min(20, Number(c.borderWidth) || 0)),
+    radius: Math.max(0, Math.min(80, Number(c.radius) || 0)),
+    glow,
+  };
 }
 
 function normalizeBlock(raw: Record<string, unknown>): TextBlock | null {
@@ -60,11 +113,29 @@ function normalizeBlock(raw: Record<string, unknown>): TextBlock | null {
     bold: Boolean(raw.bold),
     italic: Boolean(raw.italic),
     underline: Boolean(raw.underline),
-    color: typeof raw.color === "string" && /^#/.test(raw.color) ? raw.color : "#1a1a1a",
+    color: hexOrNull(raw.color) ?? "#1a1a1a",
     align,
-    fill: typeof raw.fill === "string" && /^#/.test(raw.fill) ? raw.fill : null,
+    fill: hexOrNull(raw.fill),
+    container: normalizeContainer(raw.container),
   };
 }
+
+function normalizeImageElement(raw: Record<string, unknown>): ImageElement | null {
+  const w = clamp01(Number(raw.w));
+  const h = clamp01(Number(raw.h));
+  if (w < 0.01 || h < 0.01) return null;
+  return {
+    id: uuid(),
+    bbox: { x: clamp01(Number(raw.x)), y: clamp01(Number(raw.y)), w, h },
+    fillColor: hexOrNull(raw.fillColor),
+    label: typeof raw.label === "string" ? raw.label.slice(0, 80) : undefined,
+  };
+}
+
+export type SlideConversion = {
+  textBlocks: TextBlock[];
+  imageElements: ImageElement[];
+};
 
 function parseDataUrl(dataUrl: string): { media: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -82,15 +153,15 @@ export type ConvertOptions = {
 
 /**
  * Run Claude vision on a single slide's background image and return the
- * reconstructed editable text blocks.
+ * reconstructed editable text blocks, containers, and removable image regions.
  */
 export async function convertSlide(
   slide: Slide,
   opts: ConvertOptions = {}
-): Promise<TextBlock[]> {
+): Promise<SlideConversion> {
   if (!slide.background) {
     // No image to analyze — fall back to any harvested source text.
-    return fallbackFromSourceText(slide);
+    return { textBlocks: fallbackFromSourceText(slide), imageElements: [] };
   }
 
   const apiKey = opts.apiKey || process.env.ANTHROPIC_API_KEY;
@@ -105,7 +176,9 @@ export async function convertSlide(
 
   const msg = await client.messages.create({
     model: MODEL,
-    max_tokens: 4096,
+    // Rich per-block output (text + container geometry/colors) is verbose;
+    // dense slides need plenty of room or the JSON truncates and fails to parse.
+    max_tokens: 16000,
     system: [
       {
         type: "text",
@@ -132,27 +205,37 @@ export async function convertSlide(
 
   const textPart = msg.content.find((c) => c.type === "text");
   const out = textPart && "text" in textPart ? textPart.text : "";
-  return parseBlocks(out, slide);
+  return parseConversion(out, slide);
 }
 
-function parseBlocks(out: string, slide: Slide): TextBlock[] {
+function parseConversion(out: string, slide: Slide): SlideConversion {
   let json = out.trim();
   // Strip accidental code fences.
   json = json.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   // Grab the outermost JSON object.
   const start = json.indexOf("{");
   const end = json.lastIndexOf("}");
-  if (start === -1 || end === -1) return fallbackFromSourceText(slide);
+  if (start === -1 || end === -1) {
+    console.error("[convert] no JSON object found in model output:", out.slice(0, 200));
+    return { textBlocks: fallbackFromSourceText(slide), imageElements: [] };
+  }
   json = json.slice(start, end + 1);
 
   try {
-    const parsed = JSON.parse(json) as { textBlocks?: Record<string, unknown>[] };
-    const blocks = (parsed.textBlocks ?? [])
+    const parsed = JSON.parse(json) as {
+      textBlocks?: Record<string, unknown>[];
+      imageElements?: Record<string, unknown>[];
+    };
+    const textBlocks = (parsed.textBlocks ?? [])
       .map(normalizeBlock)
       .filter((b): b is TextBlock => b !== null);
-    return blocks;
-  } catch {
-    return fallbackFromSourceText(slide);
+    const imageElements = (parsed.imageElements ?? [])
+      .map(normalizeImageElement)
+      .filter((e): e is ImageElement => e !== null);
+    return { textBlocks, imageElements };
+  } catch (e) {
+    console.error("[convert] JSON parse failed:", (e as Error).message, "len:", json.length, "tail:", json.slice(-120));
+    return { textBlocks: fallbackFromSourceText(slide), imageElements: [] };
   }
 }
 
