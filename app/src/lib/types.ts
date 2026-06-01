@@ -28,9 +28,13 @@ export type TextBlock = {
 export type Slide = {
   id: string;
   index: number;
-  // Background is the original rendered image (data URL or stored path).
-  // Keeping it guarantees visual fidelity; editable text sits on top.
+  // Background is the rendered image the editor/export draws (data URL).
+  // After conversion this is the "cleaned" image (baked text painted out on
+  // solid regions); editable text sits on top. Keeping it guarantees visual
+  // fidelity for all non-text graphics.
   background: string;
+  // The untouched original render, kept so the user can restore or compare.
+  originalBackground?: string;
   width: number; // pixels of the source image
   height: number;
   textBlocks: TextBlock[];

@@ -40,7 +40,11 @@ The app is a standard Next.js (App Router) project and runs anywhere Node 18+ is
 
 ## How accuracy is achieved
 
-The background image is always preserved, so the slide *looks* identical to the source (100% visual fidelity). The editable layer is reconstructed by Claude vision and positioned with normalized coordinates that map exactly onto the background. The system prompt is prompt-cached across slides to reduce cost and latency. If conversion is unavailable for a slide, harvested source text is laid out as a fallback so the slide is still editable.
+- **Visual fidelity:** the rendered slide is preserved as a background image, so all non-text graphics (shapes, charts, photos, gradients, logos) look identical to the source.
+- **Clean editable text:** after Claude vision extracts each text element, re·present *inpaints* the background — sampling the solid color around each text region and painting over the baked-in glyphs — then places transparent, editable text on top. This removes the "double text" you'd otherwise get from overlaying new text on the original. Text on photos/gradients (non-uniform backgrounds) is left untouched and can be edited or deleted manually.
+- **Exact positioning:** text blocks use normalized 0–1 coordinates that map precisely onto the slide in both the editor and exports.
+- **Cost/latency:** the vision system prompt is prompt-cached across slides. Set `CLAUDE_MODEL=claude-sonnet-4-6` for faster, cheaper conversion.
+- The untouched original render is kept on each slide (`originalBackground`) for comparison/restore. If conversion is unavailable, harvested source text is laid out as a fallback so the slide is still editable.
 
 ## Architecture
 

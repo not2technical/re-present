@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadDeck, saveDeck } from "@/lib/store";
 import { convertSlide } from "@/lib/convert/vision";
+import { cleanBackground } from "@/lib/convert/sample";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -23,7 +24,16 @@ export async function POST(req: NextRequest) {
 
     for (const slide of targets) {
       const blocks = await convertSlide(slide);
-      slide.textBlocks = blocks;
+      // Paint out baked-in text on solid regions so the editable text sits on
+      // a clean background with no "double text". Keep the original for compare.
+      const original = slide.originalBackground ?? slide.background;
+      const { background, blocks: cleaned } = await cleanBackground(
+        original,
+        blocks
+      );
+      slide.originalBackground = original;
+      slide.background = background;
+      slide.textBlocks = cleaned;
       slide.converted = true;
     }
 
