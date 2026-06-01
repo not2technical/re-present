@@ -50,7 +50,8 @@ export async function exportPdf(deck: Deck): Promise<Buffer> {
     }
 
     // Editable shapes (above background, below text). PDF origin is bottom-left.
-    for (const shape of slide.shapes ?? []) {
+    // Only lifted shapes are drawn; un-lifted shapes are still in the background.
+    for (const shape of (slide.shapes ?? []).filter((s) => s.lifted)) {
       const sx = shape.bbox.x * pageW;
       const syTop = shape.bbox.y * pageH;
       const sw = shape.bbox.w * pageW;

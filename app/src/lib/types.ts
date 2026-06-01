@@ -67,6 +67,12 @@ export type Shape = {
   // "h" horizontal, "v" vertical, "d1" top-left→bottom-right, "d2" top-right→bottom-left.
   orientation?: "h" | "v" | "d1" | "d2";
   label?: string;
+  // false = still baked into the background image (shown there, pristine).
+  // true  = "lifted": its footprint has been erased from the background and it
+  //         is now an independent overlay object drawn on export. Shapes are
+  //         only lifted when the user edits or deletes them, so untouched
+  //         slides keep their original art intact (no bands cutting images).
+  lifted?: boolean;
 };
 
 export type Slide = {

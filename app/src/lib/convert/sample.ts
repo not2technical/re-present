@@ -396,10 +396,9 @@ function eraseShape(
 
 export async function cleanBackground(
   backgroundDataUrl: string,
-  blocks: TextBlock[],
-  shapes: Shape[] = []
+  blocks: TextBlock[]
 ): Promise<{ background: string; blocks: TextBlock[] }> {
-  if (!backgroundDataUrl.startsWith("data:") || (blocks.length === 0 && shapes.length === 0)) {
+  if (!backgroundDataUrl.startsWith("data:") || blocks.length === 0) {
     return { background: backgroundDataUrl, blocks };
   }
   let img;
@@ -427,13 +426,6 @@ export async function cleanBackground(
     }
     return dominantColor(out);
   };
-
-  // 0. Erase detected shapes from the background so they become editable
-  //    overlays without doubling. Fill each shape's region from the color just
-  //    outside it (so panels/dividers vanish into the surrounding background).
-  for (const sh of shapes) {
-    eraseShape(ctx, sh, W, H, sampleRing);
-  }
 
   // Process containers first (they erase larger regions), then plain text.
   const withContainer = blocks.filter((b) => b.container);
@@ -468,6 +460,43 @@ export async function cleanBackground(
   // the editable blocks (text renders transparent on top of the repainted box).
   const cleanedBlocks = blocks.map((b) => ({ ...b, fill: null, container: null }));
   return { background: cleaned, blocks: cleanedBlocks };
+}
+
+// Lift a single shape off the background: erase its footprint so it can be
+// re-rendered as an editable overlay. Borders/lines erase only their band;
+// small filled chips erase their whole region (same rules as eraseShape).
+export async function liftShapeFromBackground(
+  backgroundDataUrl: string,
+  shape: Shape
+): Promise<string> {
+  if (!backgroundDataUrl.startsWith("data:")) return backgroundDataUrl;
+  let img;
+  try {
+    img = await loadImage(Buffer.from(backgroundDataUrl.split(",")[1], "base64"));
+  } catch {
+    return backgroundDataUrl;
+  }
+  const W = img.width;
+  const H = img.height;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+
+  const sampleRing = (bbox: Bbox): string | null => {
+    const out: RGB[] = [];
+    for (const [px, py] of ringPoints(bbox, W, H)) {
+      const cx = Math.max(0, Math.min(W - 1, Math.round(px)));
+      const cy = Math.max(0, Math.min(H - 1, Math.round(py)));
+      const d = ctx.getImageData(cx, cy, 1, 1).data;
+      if (d[3] === 0) continue;
+      out.push({ r: d[0], g: d[1], b: d[2] });
+    }
+    return dominantColor(out);
+  };
+
+  eraseShape(ctx, shape, W, H, sampleRing);
+  const png = canvas.toBuffer("image/png");
+  return `data:image/png;base64,${png.toString("base64")}`;
 }
 
 // Remove an image element region from a background, filling with its sampled

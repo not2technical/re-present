@@ -123,8 +123,57 @@ export default function Editor({ deckId }: Props) {
   }
 
   // ----- shape editing (mirrors text-block helpers) -----
+
+  // The first time a detected (baked-in) shape is touched, "lift" it: erase its
+  // footprint from the background server-side so it becomes an independent
+  // overlay. Until then the shape is shown by the pristine background, so
+  // untouched slides keep illustrations crossing dividers fully intact.
+  const liftShape = useCallback(
+    async (shapeId: string) => {
+      if (!deck) return;
+      const sh = deck.slides[current]?.shapes?.find((s) => s.id === shapeId);
+      if (!sh || sh.lifted) return;
+      // Optimistically mark lifted so we don't double-fire.
+      setDeck((prev) => {
+        if (!prev) return prev;
+        const slides = prev.slides.map((s, i) =>
+          i === current
+            ? {
+                ...s,
+                shapes: (s.shapes ?? []).map((x) =>
+                  x.id === shapeId ? { ...x, lifted: true } : x
+                ),
+              }
+            : s
+        );
+        return { ...prev, slides };
+      });
+      try {
+        const res = await fetch("/api/lift-shape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deckId, slideIndex: current, shapeId }),
+        });
+        const data = await res.json();
+        if (res.ok && data.background) {
+          setDeck((prev) => {
+            if (!prev) return prev;
+            const slides = prev.slides.map((s, i) =>
+              i === current ? { ...s, background: data.background } : s
+            );
+            return { ...prev, slides };
+          });
+        }
+      } catch {
+        // leave optimistic state; export still treats it as lifted
+      }
+    },
+    [deck, deckId, current]
+  );
+
   const updateShape = useCallback(
     (shapeId: string, patch: Partial<Shape>) => {
+      void liftShape(shapeId);
       setDeck((prev) => {
         if (!prev) return prev;
         const slides = prev.slides.map((s, i) =>
@@ -140,11 +189,12 @@ export default function Editor({ deckId }: Props) {
         return { ...prev, slides };
       });
     },
-    [current]
+    [current, liftShape]
   );
 
   const updateShapeBbox = useCallback(
     (shapeId: string, bbox: Partial<Shape["bbox"]>) => {
+      void liftShape(shapeId);
       setDeck((prev) => {
         if (!prev) return prev;
         const slides = prev.slides.map((s, i) =>
@@ -160,10 +210,13 @@ export default function Editor({ deckId }: Props) {
         return { ...prev, slides };
       });
     },
-    [current]
+    [current, liftShape]
   );
 
-  function deleteShape(shapeId: string) {
+  async function deleteShape(shapeId: string) {
+    // Lift first so the shape's footprint is erased from the background, then
+    // drop it from the overlay list — net effect: the shape is gone.
+    await liftShape(shapeId);
     setDeck((prev) => {
       if (!prev) return prev;
       const slides = prev.slides.map((s, i) =>
@@ -187,6 +240,7 @@ export default function Editor({ deckId }: Props) {
       stroke: null,
       strokeWidth: 0,
       radius: 0,
+      lifted: true, // brand-new, not part of the background
     };
     setDeck((prev) => {
       if (!prev) return prev;
@@ -513,24 +567,31 @@ export default function Editor({ deckId }: Props) {
                   className={`box-border ${
                     selected === sh.id
                       ? "ring-2 ring-emerald-500"
-                      : "hover:ring-1 hover:ring-emerald-300"
+                      : sh.lifted
+                      ? "hover:ring-1 hover:ring-emerald-300"
+                      : "border border-dashed border-emerald-400/70 hover:border-emerald-500"
                   }`}
                 >
-                  {sh.kind === "line" ? (
-                    <div style={lineStyle(sh)} />
-                  ) : (
-                    <div
-                      className="w-full h-full"
-                      style={{
-                        background: sh.fill || "transparent",
-                        border:
-                          sh.stroke && sh.strokeWidth > 0
-                            ? `${Math.max(1, (sh.strokeWidth / 720) * canvasSize.h)}px solid ${sh.stroke}`
-                            : undefined,
-                        borderRadius: (sh.radius / 720) * canvasSize.h,
-                      }}
-                    />
-                  )}
+                  {/* Un-lifted shapes are still painted in the background, so we
+                      only show a dashed selection handle. Lifted/new shapes are
+                      rendered for real here. */}
+                  {sh.lifted ? (
+                    sh.kind === "line" ? (
+                      <div style={lineStyle(sh)} />
+                    ) : (
+                      <div
+                        className="w-full h-full"
+                        style={{
+                          background: sh.fill || "transparent",
+                          border:
+                            sh.stroke && sh.strokeWidth > 0
+                              ? `${Math.max(1, (sh.strokeWidth / 720) * canvasSize.h)}px solid ${sh.stroke}`
+                              : undefined,
+                          borderRadius: (sh.radius / 720) * canvasSize.h,
+                        }}
+                      />
+                    )
+                  ) : null}
                 </Rnd>
               ))}
 
