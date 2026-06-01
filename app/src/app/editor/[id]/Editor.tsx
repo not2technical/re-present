@@ -5,6 +5,7 @@ import { Rnd } from "react-rnd";
 import type { Deck, Slide, TextBlock } from "@/lib/types";
 
 type Props = { deckId: string };
+type Mode = "text" | "images";
 
 export default function Editor({ deckId }: Props) {
   const [deck, setDeck] = useState<Deck | null>(null);
@@ -13,6 +14,8 @@ export default function Editor({ deckId }: Props) {
   const [converting, setConverting] = useState(false);
   const [convertMsg, setConvertMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [mode, setMode] = useState<Mode>("text");
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const [canvasSize, setCanvasSize] = useState({ w: 960, h: 540 });
 
@@ -155,6 +158,39 @@ export default function Editor({ deckId }: Props) {
     setConvertMsg(`Converted ${done} slide${done === 1 ? "" : "s"}.`);
   }
 
+  // Remove an image/graphic region from the current slide's background.
+  async function removeImage(elementId: string) {
+    if (!deck) return;
+    setRemovingId(elementId);
+    try {
+      const res = await fetch("/api/remove-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deckId, slideIndex: current, elementId }),
+      });
+      const data = await res.json();
+      if (res.ok && data.background) {
+        setDeck((prev) => {
+          if (!prev) return prev;
+          const slides = prev.slides.map((s, i) =>
+            i === current
+              ? {
+                  ...s,
+                  background: data.background,
+                  imageElements: (s.imageElements ?? []).filter(
+                    (e) => e.id !== elementId
+                  ),
+                }
+              : s
+          );
+          return { ...prev, slides };
+        });
+      }
+    } finally {
+      setRemovingId(null);
+    }
+  }
+
   if (!deck) {
     return (
       <div className="min-h-screen flex items-center justify-center text-slate-500">
@@ -179,6 +215,35 @@ export default function Editor({ deckId }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {/* Mode toggle: edit text vs. remove images */}
+          <div className="flex rounded-md border border-slate-300 overflow-hidden mr-1">
+            <button
+              onClick={() => {
+                setMode("text");
+                setSelected(null);
+              }}
+              className={`text-sm px-3 py-1.5 ${
+                mode === "text"
+                  ? "bg-indigo-600 text-white"
+                  : "bg-white text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              Text
+            </button>
+            <button
+              onClick={() => {
+                setMode("images");
+                setSelected(null);
+              }}
+              className={`text-sm px-3 py-1.5 ${
+                mode === "images"
+                  ? "bg-indigo-600 text-white"
+                  : "bg-white text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              Images
+            </button>
+          </div>
           {convertMsg && (
             <span className="text-xs text-slate-500 mr-2">{convertMsg}</span>
           )}
@@ -268,81 +333,153 @@ export default function Editor({ deckId }: Props) {
               />
             )}
 
-            {slide?.textBlocks.map((b) => (
-              <Rnd
-                key={b.id}
-                bounds="parent"
-                size={{
-                  width: b.bbox.w * canvasSize.w,
-                  height: b.bbox.h * canvasSize.h,
-                }}
-                position={{
-                  x: b.bbox.x * canvasSize.w,
-                  y: b.bbox.y * canvasSize.h,
-                }}
-                onDragStop={(_e, d) =>
-                  updateBbox(b.id, {
-                    x: d.x / canvasSize.w,
-                    y: d.y / canvasSize.h,
-                  })
-                }
-                onResizeStop={(_e, _dir, ref, _delta, pos) =>
-                  updateBbox(b.id, {
-                    w: ref.offsetWidth / canvasSize.w,
-                    h: ref.offsetHeight / canvasSize.h,
-                    x: pos.x / canvasSize.w,
-                    y: pos.y / canvasSize.h,
-                  })
-                }
-                onMouseDown={() => setSelected(b.id)}
-                className={`box-border ${
-                  selected === b.id
-                    ? "ring-2 ring-indigo-500"
-                    : "hover:ring-1 hover:ring-indigo-300"
-                }`}
-                style={{ background: b.fill || "transparent" }}
-              >
-                <textarea
-                  value={b.text}
-                  onChange={(e) => updateBlock(b.id, { text: e.target.value })}
-                  onFocus={() => setSelected(b.id)}
-                  spellCheck={false}
-                  className="w-full h-full resize-none bg-transparent outline-none overflow-hidden p-0 leading-tight"
-                  style={{
-                    fontSize: (b.fontSize / 720) * canvasSize.h,
-                    fontFamily: b.fontFamily,
-                    fontWeight: b.bold ? 700 : 400,
-                    fontStyle: b.italic ? "italic" : "normal",
-                    textDecoration: b.underline ? "underline" : "none",
-                    color: b.color,
-                    textAlign: b.align,
+            {mode === "text" &&
+              slide?.textBlocks.map((b) => (
+                <Rnd
+                  key={b.id}
+                  bounds="parent"
+                  size={{
+                    width: b.bbox.w * canvasSize.w,
+                    height: b.bbox.h * canvasSize.h,
                   }}
-                />
-              </Rnd>
-            ))}
+                  position={{
+                    x: b.bbox.x * canvasSize.w,
+                    y: b.bbox.y * canvasSize.h,
+                  }}
+                  onDragStop={(_e, d) =>
+                    updateBbox(b.id, {
+                      x: d.x / canvasSize.w,
+                      y: d.y / canvasSize.h,
+                    })
+                  }
+                  onResizeStop={(_e, _dir, ref, _delta, pos) =>
+                    updateBbox(b.id, {
+                      w: ref.offsetWidth / canvasSize.w,
+                      h: ref.offsetHeight / canvasSize.h,
+                      x: pos.x / canvasSize.w,
+                      y: pos.y / canvasSize.h,
+                    })
+                  }
+                  onMouseDown={() => setSelected(b.id)}
+                  className={`box-border ${
+                    selected === b.id
+                      ? "ring-2 ring-indigo-500"
+                      : "hover:ring-1 hover:ring-indigo-300"
+                  }`}
+                  style={{ background: b.fill || "transparent" }}
+                >
+                  <textarea
+                    value={b.text}
+                    onChange={(e) => updateBlock(b.id, { text: e.target.value })}
+                    onFocus={() => setSelected(b.id)}
+                    spellCheck={false}
+                    className="w-full h-full resize-none bg-transparent outline-none overflow-hidden p-0 leading-tight"
+                    style={{
+                      fontSize: (b.fontSize / 720) * canvasSize.h,
+                      fontFamily: b.fontFamily,
+                      fontWeight: b.bold ? 700 : 400,
+                      fontStyle: b.italic ? "italic" : "normal",
+                      textDecoration: b.underline ? "underline" : "none",
+                      color: b.color,
+                      textAlign: b.align,
+                    }}
+                  />
+                </Rnd>
+              ))}
+
+            {/* Image-removal overlays */}
+            {mode === "images" &&
+              (slide?.imageElements ?? []).map((el) => (
+                <div
+                  key={el.id}
+                  className={`absolute group border-2 ${
+                    selected === el.id
+                      ? "border-rose-500 bg-rose-500/10"
+                      : "border-rose-400/60 bg-rose-400/5 hover:bg-rose-400/15"
+                  }`}
+                  style={{
+                    left: el.bbox.x * canvasSize.w,
+                    top: el.bbox.y * canvasSize.h,
+                    width: el.bbox.w * canvasSize.w,
+                    height: el.bbox.h * canvasSize.h,
+                  }}
+                  onClick={() => setSelected(el.id)}
+                >
+                  <span className="absolute -top-5 left-0 text-[10px] bg-rose-500 text-white px-1 rounded whitespace-nowrap">
+                    {el.label || "image"}
+                  </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeImage(el.id);
+                    }}
+                    disabled={removingId === el.id}
+                    className="absolute top-1 right-1 text-[11px] bg-rose-600 text-white px-2 py-0.5 rounded shadow hover:bg-rose-700 disabled:opacity-50"
+                  >
+                    {removingId === el.id ? "…" : "Delete"}
+                  </button>
+                </div>
+              ))}
           </div>
         </main>
 
         {/* Inspector */}
         <aside className="w-64 bg-white border-l border-slate-200 p-4 overflow-y-auto">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-slate-700">Properties</h2>
-            <button
-              onClick={addBlock}
-              className="text-xs rounded bg-slate-100 px-2 py-1 hover:bg-slate-200"
-            >
-              + Text
-            </button>
+            <h2 className="text-sm font-semibold text-slate-700">
+              {mode === "images" ? "Images" : "Properties"}
+            </h2>
+            {mode === "text" && (
+              <button
+                onClick={addBlock}
+                className="text-xs rounded bg-slate-100 px-2 py-1 hover:bg-slate-200"
+              >
+                + Text
+              </button>
+            )}
           </div>
 
-          {!selBlock && (
+          {mode === "images" && (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-400">
+                Click <span className="text-rose-600 font-medium">Delete</span> on
+                any highlighted region to remove that graphic. The area is filled
+                in from the surrounding background.
+              </p>
+              {(slide?.imageElements ?? []).length === 0 && (
+                <p className="text-xs text-slate-400">
+                  No removable images detected on this slide
+                  {slide && !slide.converted ? " yet — run “Make editable” first." : "."}
+                </p>
+              )}
+              {(slide?.imageElements ?? []).map((el) => (
+                <div
+                  key={el.id}
+                  className="flex items-center justify-between gap-2 border border-slate-200 rounded px-2 py-1.5"
+                >
+                  <span className="text-xs text-slate-600 truncate">
+                    {el.label || "image"}
+                  </span>
+                  <button
+                    onClick={() => removeImage(el.id)}
+                    disabled={removingId === el.id}
+                    className="text-[11px] text-rose-600 border border-rose-200 rounded px-2 py-0.5 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    {removingId === el.id ? "Removing…" : "Delete"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {mode === "text" && !selBlock && (
             <p className="text-xs text-slate-400">
               Select a text box to edit its style, or click “Make editable” to
               extract text from image-only slides.
             </p>
           )}
 
-          {selBlock && (
+          {mode === "text" && selBlock && (
             <div className="space-y-3 text-sm">
               <Field label="Font size">
                 <input
