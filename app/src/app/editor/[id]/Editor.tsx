@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
-import type { Deck, Slide, TextBlock } from "@/lib/types";
+import type { Deck, Slide, TextBlock, Shape } from "@/lib/types";
 
 type Props = { deckId: string };
-type Mode = "text" | "images";
+type Mode = "text" | "shapes" | "images";
 
 export default function Editor({ deckId }: Props) {
   const [deck, setDeck] = useState<Deck | null>(null);
@@ -122,6 +122,82 @@ export default function Editor({ deckId }: Props) {
     setSelected(id);
   }
 
+  // ----- shape editing (mirrors text-block helpers) -----
+  const updateShape = useCallback(
+    (shapeId: string, patch: Partial<Shape>) => {
+      setDeck((prev) => {
+        if (!prev) return prev;
+        const slides = prev.slides.map((s, i) =>
+          i === current
+            ? {
+                ...s,
+                shapes: (s.shapes ?? []).map((sh) =>
+                  sh.id === shapeId ? { ...sh, ...patch } : sh
+                ),
+              }
+            : s
+        );
+        return { ...prev, slides };
+      });
+    },
+    [current]
+  );
+
+  const updateShapeBbox = useCallback(
+    (shapeId: string, bbox: Partial<Shape["bbox"]>) => {
+      setDeck((prev) => {
+        if (!prev) return prev;
+        const slides = prev.slides.map((s, i) =>
+          i === current
+            ? {
+                ...s,
+                shapes: (s.shapes ?? []).map((sh) =>
+                  sh.id === shapeId ? { ...sh, bbox: { ...sh.bbox, ...bbox } } : sh
+                ),
+              }
+            : s
+        );
+        return { ...prev, slides };
+      });
+    },
+    [current]
+  );
+
+  function deleteShape(shapeId: string) {
+    setDeck((prev) => {
+      if (!prev) return prev;
+      const slides = prev.slides.map((s, i) =>
+        i === current
+          ? { ...s, shapes: (s.shapes ?? []).filter((sh) => sh.id !== shapeId) }
+          : s
+      );
+      return { ...prev, slides };
+    });
+    setSelected(null);
+  }
+
+  function addShape() {
+    if (!deck) return;
+    const id = crypto.randomUUID();
+    const shape: Shape = {
+      id,
+      kind: "rect",
+      bbox: { x: 0.35, y: 0.4, w: 0.3, h: 0.2 },
+      fill: "#cccccc",
+      stroke: null,
+      strokeWidth: 0,
+      radius: 0,
+    };
+    setDeck((prev) => {
+      if (!prev) return prev;
+      const slides = prev.slides.map((s, i) =>
+        i === current ? { ...s, shapes: [...(s.shapes ?? []), shape] } : s
+      );
+      return { ...prev, slides };
+    });
+    setSelected(id);
+  }
+
   async function save() {
     if (!deck) return;
     setSaving(true);
@@ -200,7 +276,35 @@ export default function Editor({ deckId }: Props) {
   }
 
   const selBlock = slide?.textBlocks.find((b) => b.id === selected) || null;
+  const selShape = slide?.shapes?.find((sh) => sh.id === selected) || null;
   const unconverted = deck.slides.filter((s) => !s.converted).length;
+
+  // CSS for a line shape: a thin bar rotated along the requested diagonal.
+  function lineStyle(sh: Shape): React.CSSProperties {
+    const thick = Math.max(2, (sh.strokeWidth / 720) * canvasSize.h);
+    const color = sh.stroke || "#444444";
+    if (sh.orientation === "v") {
+      return { width: thick, height: "100%", left: "50%", marginLeft: -thick / 2, background: color, position: "absolute", top: 0 };
+    }
+    if (sh.orientation === "d1" || sh.orientation === "d2") {
+      // Diagonal: draw a horizontal bar and rotate to span the box corners.
+      const w = sh.bbox.w * canvasSize.w;
+      const h = sh.bbox.h * canvasSize.h;
+      const len = Math.sqrt(w * w + h * h);
+      const angle = (sh.orientation === "d1" ? 1 : -1) * (Math.atan2(h, w) * 180) / Math.PI;
+      return {
+        width: len,
+        height: thick,
+        background: color,
+        position: "absolute",
+        top: "50%",
+        left: "50%",
+        transform: `translate(-50%,-50%) rotate(${angle}deg)`,
+      };
+    }
+    // horizontal (default)
+    return { width: "100%", height: thick, top: "50%", marginTop: -thick / 2, background: color, position: "absolute", left: 0 };
+  }
 
   return (
     <div className="h-screen flex flex-col bg-slate-100">
@@ -217,32 +321,22 @@ export default function Editor({ deckId }: Props) {
         <div className="flex items-center gap-2">
           {/* Mode toggle: edit text vs. remove images */}
           <div className="flex rounded-md border border-slate-300 overflow-hidden mr-1">
-            <button
-              onClick={() => {
-                setMode("text");
-                setSelected(null);
-              }}
-              className={`text-sm px-3 py-1.5 ${
-                mode === "text"
-                  ? "bg-indigo-600 text-white"
-                  : "bg-white text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              Text
-            </button>
-            <button
-              onClick={() => {
-                setMode("images");
-                setSelected(null);
-              }}
-              className={`text-sm px-3 py-1.5 ${
-                mode === "images"
-                  ? "bg-indigo-600 text-white"
-                  : "bg-white text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              Images
-            </button>
+            {(["text", "shapes", "images"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => {
+                  setMode(m);
+                  setSelected(null);
+                }}
+                className={`text-sm px-3 py-1.5 capitalize ${
+                  mode === m
+                    ? "bg-indigo-600 text-white"
+                    : "bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {m}
+              </button>
+            ))}
           </div>
           {convertMsg && (
             <span className="text-xs text-slate-500 mr-2">{convertMsg}</span>
@@ -387,6 +481,59 @@ export default function Editor({ deckId }: Props) {
                 </Rnd>
               ))}
 
+            {/* Shape overlays (editable) */}
+            {mode === "shapes" &&
+              (slide?.shapes ?? []).map((sh) => (
+                <Rnd
+                  key={sh.id}
+                  bounds="parent"
+                  size={{
+                    width: sh.bbox.w * canvasSize.w,
+                    height: sh.bbox.h * canvasSize.h,
+                  }}
+                  position={{
+                    x: sh.bbox.x * canvasSize.w,
+                    y: sh.bbox.y * canvasSize.h,
+                  }}
+                  onDragStop={(_e, d) =>
+                    updateShapeBbox(sh.id, {
+                      x: d.x / canvasSize.w,
+                      y: d.y / canvasSize.h,
+                    })
+                  }
+                  onResizeStop={(_e, _dir, ref, _delta, pos) =>
+                    updateShapeBbox(sh.id, {
+                      w: ref.offsetWidth / canvasSize.w,
+                      h: ref.offsetHeight / canvasSize.h,
+                      x: pos.x / canvasSize.w,
+                      y: pos.y / canvasSize.h,
+                    })
+                  }
+                  onMouseDown={() => setSelected(sh.id)}
+                  className={`box-border ${
+                    selected === sh.id
+                      ? "ring-2 ring-emerald-500"
+                      : "hover:ring-1 hover:ring-emerald-300"
+                  }`}
+                >
+                  {sh.kind === "line" ? (
+                    <div style={lineStyle(sh)} />
+                  ) : (
+                    <div
+                      className="w-full h-full"
+                      style={{
+                        background: sh.fill || "transparent",
+                        border:
+                          sh.stroke && sh.strokeWidth > 0
+                            ? `${Math.max(1, (sh.strokeWidth / 720) * canvasSize.h)}px solid ${sh.stroke}`
+                            : undefined,
+                        borderRadius: (sh.radius / 720) * canvasSize.h,
+                      }}
+                    />
+                  )}
+                </Rnd>
+              ))}
+
             {/* Image-removal overlays */}
             {mode === "images" &&
               (slide?.imageElements ?? []).map((el) => (
@@ -427,7 +574,7 @@ export default function Editor({ deckId }: Props) {
         <aside className="w-64 bg-white border-l border-slate-200 p-4 overflow-y-auto">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-slate-700">
-              {mode === "images" ? "Images" : "Properties"}
+              {mode === "images" ? "Images" : mode === "shapes" ? "Shapes" : "Properties"}
             </h2>
             {mode === "text" && (
               <button
@@ -437,7 +584,104 @@ export default function Editor({ deckId }: Props) {
                 + Text
               </button>
             )}
+            {mode === "shapes" && (
+              <button
+                onClick={addShape}
+                className="text-xs rounded bg-slate-100 px-2 py-1 hover:bg-slate-200"
+              >
+                + Shape
+              </button>
+            )}
           </div>
+
+          {mode === "shapes" && !selShape && (
+            <p className="text-xs text-slate-400">
+              Select a shape to recolor, move, resize, or delete it. Detected
+              panels, dividers, and rules are now editable objects — change the
+              square shapes that cover your images here, or delete them.
+            </p>
+          )}
+
+          {mode === "shapes" && selShape && (
+            <div className="space-y-3 text-sm">
+              <Field label="Type">
+                <div className="text-xs text-slate-500 capitalize">
+                  {selShape.label || selShape.kind}
+                </div>
+              </Field>
+              {selShape.kind === "rect" && (
+                <Field label="Fill">
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="color"
+                      value={selShape.fill || "#cccccc"}
+                      onChange={(e) => updateShape(selShape.id, { fill: e.target.value })}
+                      className="flex-1 h-8 border border-slate-300 rounded"
+                    />
+                    <button
+                      onClick={() => updateShape(selShape.id, { fill: null })}
+                      className="text-xs border border-slate-300 rounded px-2 py-1"
+                    >
+                      none
+                    </button>
+                  </div>
+                </Field>
+              )}
+              <Field label={selShape.kind === "line" ? "Line color" : "Border color"}>
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="color"
+                    value={selShape.stroke || "#444444"}
+                    onChange={(e) =>
+                      updateShape(selShape.id, {
+                        stroke: e.target.value,
+                        strokeWidth: selShape.strokeWidth || 2,
+                      })
+                    }
+                    className="flex-1 h-8 border border-slate-300 rounded"
+                  />
+                  <button
+                    onClick={() => updateShape(selShape.id, { stroke: null })}
+                    className="text-xs border border-slate-300 rounded px-2 py-1"
+                  >
+                    none
+                  </button>
+                </div>
+              </Field>
+              <Field label={`Thickness (${selShape.strokeWidth})`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={20}
+                  value={selShape.strokeWidth}
+                  onChange={(e) =>
+                    updateShape(selShape.id, { strokeWidth: Number(e.target.value) })
+                  }
+                  className="w-full"
+                />
+              </Field>
+              {selShape.kind === "rect" && (
+                <Field label={`Corner radius (${selShape.radius})`}>
+                  <input
+                    type="range"
+                    min={0}
+                    max={80}
+                    value={selShape.radius}
+                    onChange={(e) =>
+                      updateShape(selShape.id, { radius: Number(e.target.value) })
+                    }
+                    className="w-full"
+                  />
+                </Field>
+              )}
+              <button
+                onClick={() => deleteShape(selShape.id)}
+                className="w-full text-xs text-red-600 border border-red-200 rounded px-2 py-1.5 hover:bg-red-50"
+              >
+                Delete shape
+              </button>
+            </div>
+          )}
 
           {mode === "images" && (
             <div className="space-y-3">

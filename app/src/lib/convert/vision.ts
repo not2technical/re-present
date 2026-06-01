@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { v4 as uuid } from "uuid";
-import type { Slide, TextBlock, Container, ImageElement } from "../types";
+import type { Slide, TextBlock, Container, ImageElement, Shape } from "../types";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-8";
 
@@ -40,6 +40,18 @@ Return ONLY a JSON object (no markdown fences, no prose) matching exactly:
       "label": string,           // short description, e.g. "robot mascot", "logo", "chart"
       "fillColor": string|null   // solid color of the area immediately around it, null if textured
     }
+  ],
+  "shapes": [                    // simple GEOMETRIC vector shapes: panels, dividers, rules, boxes
+    {
+      "kind": "rect"|"line",
+      "x": number, "y": number, "w": number, "h": number,  // bounds, fractions 0..1
+      "fill": string|null,        // interior hex color for a filled rect/panel, null if not filled
+      "stroke": string|null,      // outline/line hex color, null if none
+      "strokeWidth": number,      // thickness in px on a 720px-tall slide
+      "radius": number,           // corner radius px (rect), 0 if square
+      "orientation": "h"|"v"|"d1"|"d2",  // line only: h, v, or diagonals d1 (TL->BR) / d2 (TR->BL)
+      "label": string             // e.g. "quadrant divider", "panel background", "footer rule"
+    }
   ]
 }
 
@@ -57,11 +69,19 @@ Rules for CONTAINER (critical for fidelity):
 - This lets us repaint a clean box and remove the original baked text/box underneath — so be accurate about colors.
 
 Rules for IMAGE ELEMENTS:
-- List distinct NON-TEXT graphics that a user might delete: photos, illustrations, mascots, logos, icons, decorative shapes, charts. One entry per distinct object.
+- List distinct NON-TEXT pictorial graphics that a user might delete: photos, illustrations, mascots, logos, icons, charts. One entry per distinct object.
 - Do NOT list the whole-slide background, gradients, or container boxes (those are handled above).
+- Do NOT list plain geometric shapes/lines here — those go in "shapes".
 - "fillColor" = the solid color immediately surrounding the object if uniform, else null.
 
-If the slide has no text, return {"textBlocks": [], "imageElements": [...]}.`;
+Rules for SHAPES (so users can move/recolor/delete structural geometry):
+- List simple GEOMETRIC elements: dividing lines, grid/quadrant separators, horizontal rules, panel/quadrant background rectangles, framing boxes, underlines.
+- Use "rect" for filled or outlined rectangles/panels; use "line" for straight separators/rules (set orientation).
+- Read fill and stroke colors from the actual pixels. Give tight, accurate bounds — these are lifted off the image and become editable, and the area underneath is erased.
+- Do NOT include the container boxes already described under a textBlock's "container".
+- Do NOT include illustrations/icons (those are imageElements). Only clean geometric shapes belong here.
+
+If the slide has no text, still return the other arrays. Always return all of "textBlocks", "imageElements", "shapes" (use [] when empty).`;
 
 function clamp01(n: number): number {
   if (typeof n !== "number" || Number.isNaN(n)) return 0;
@@ -132,9 +152,40 @@ function normalizeImageElement(raw: Record<string, unknown>): ImageElement | nul
   };
 }
 
+function normalizeShape(raw: Record<string, unknown>): Shape | null {
+  const kind = raw.kind === "line" ? "line" : "rect";
+  const w = clamp01(Number(raw.w));
+  const h = clamp01(Number(raw.h));
+  // Lines may have ~0 thickness in one axis; rects need real area.
+  if (kind === "rect" && (w < 0.005 || h < 0.005)) return null;
+  const fill = hexOrNull(raw.fill);
+  const stroke = hexOrNull(raw.stroke);
+  if (!fill && !stroke) return null; // invisible shape -> skip
+  const orient = raw.orientation;
+  return {
+    id: uuid(),
+    kind,
+    bbox: { x: clamp01(Number(raw.x)), y: clamp01(Number(raw.y)), w, h },
+    fill,
+    stroke,
+    strokeWidth: Math.max(0, Math.min(40, Number(raw.strokeWidth) || (kind === "line" ? 2 : 0))),
+    radius: Math.max(0, Math.min(120, Number(raw.radius) || 0)),
+    orientation:
+      orient === "h" || orient === "v" || orient === "d1" || orient === "d2"
+        ? orient
+        : kind === "line"
+        ? w >= h
+          ? "h"
+          : "v"
+        : undefined,
+    label: typeof raw.label === "string" ? raw.label.slice(0, 80) : undefined,
+  };
+}
+
 export type SlideConversion = {
   textBlocks: TextBlock[];
   imageElements: ImageElement[];
+  shapes: Shape[];
 };
 
 function parseDataUrl(dataUrl: string): { media: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } {
@@ -161,7 +212,7 @@ export async function convertSlide(
 ): Promise<SlideConversion> {
   if (!slide.background) {
     // No image to analyze — fall back to any harvested source text.
-    return { textBlocks: fallbackFromSourceText(slide), imageElements: [] };
+    return { textBlocks: fallbackFromSourceText(slide), imageElements: [], shapes: [] };
   }
 
   const apiKey = opts.apiKey || process.env.ANTHROPIC_API_KEY;
@@ -217,7 +268,7 @@ function parseConversion(out: string, slide: Slide): SlideConversion {
   const end = json.lastIndexOf("}");
   if (start === -1 || end === -1) {
     console.error("[convert] no JSON object found in model output:", out.slice(0, 200));
-    return { textBlocks: fallbackFromSourceText(slide), imageElements: [] };
+    return { textBlocks: fallbackFromSourceText(slide), imageElements: [], shapes: [] };
   }
   json = json.slice(start, end + 1);
 
@@ -225,6 +276,7 @@ function parseConversion(out: string, slide: Slide): SlideConversion {
     const parsed = JSON.parse(json) as {
       textBlocks?: Record<string, unknown>[];
       imageElements?: Record<string, unknown>[];
+      shapes?: Record<string, unknown>[];
     };
     const textBlocks = (parsed.textBlocks ?? [])
       .map(normalizeBlock)
@@ -232,10 +284,13 @@ function parseConversion(out: string, slide: Slide): SlideConversion {
     const imageElements = (parsed.imageElements ?? [])
       .map(normalizeImageElement)
       .filter((e): e is ImageElement => e !== null);
-    return { textBlocks, imageElements };
+    const shapes = (parsed.shapes ?? [])
+      .map(normalizeShape)
+      .filter((s): s is Shape => s !== null);
+    return { textBlocks, imageElements, shapes };
   } catch (e) {
     console.error("[convert] JSON parse failed:", (e as Error).message, "len:", json.length, "tail:", json.slice(-120));
-    return { textBlocks: fallbackFromSourceText(slide), imageElements: [] };
+    return { textBlocks: fallbackFromSourceText(slide), imageElements: [], shapes: [] };
   }
 }
 

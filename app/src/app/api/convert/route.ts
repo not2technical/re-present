@@ -23,19 +23,31 @@ export async function POST(req: NextRequest) {
         : deck.slides.filter((s) => !s.converted);
 
     for (const slide of targets) {
-      const { textBlocks, imageElements } = await convertSlide(slide);
-      // Repaint clean containers + paint out baked text so the editable text
-      // sits on a clean background with no doubling. Keep the original for
-      // compare/restore.
+      const { textBlocks, imageElements, shapes } = await convertSlide(slide);
+      // Erase detected shapes + repaint clean containers + paint out baked text
+      // so editable layers sit on a clean background with no doubling. Keep the
+      // original for compare/restore.
       const original = slide.originalBackground ?? slide.background;
       const { background, blocks: cleaned } = await cleanBackground(
         original,
-        textBlocks
+        textBlocks,
+        shapes
       );
+      // Large panels keep their geometry/border editable but drop their fill:
+      // the cleaned background still shows that fill (we only erased borders),
+      // and a solid fill drawn on export would hide illustrations layered on
+      // top of the panel. Small chips keep their fill.
+      const adjustedShapes = shapes.map((sh) => {
+        const isLargePanel =
+          sh.kind === "rect" && (sh.bbox.w > 0.25 || sh.bbox.h > 0.25);
+        return isLargePanel ? { ...sh, fill: null } : sh;
+      });
+
       slide.originalBackground = original;
       slide.background = background;
       slide.textBlocks = cleaned;
       slide.imageElements = imageElements;
+      slide.shapes = adjustedShapes;
       slide.converted = true;
     }
 

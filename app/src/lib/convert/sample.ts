@@ -1,5 +1,5 @@
 import { createCanvas, loadImage, type SKRSContext2D } from "@napi-rs/canvas";
-import type { TextBlock, Container, Bbox } from "../types";
+import type { TextBlock, Container, Bbox, Shape } from "../types";
 
 // Background reconstruction for re-present.
 //
@@ -297,13 +297,109 @@ function repaintContainer(
   }
 }
 
+// Erase a shape from the background. For a filled rect/panel we fill its area
+// (plus a small margin) with the surrounding color; for a thin line/divider we
+// fill a band along it. If the surroundings aren't a uniform color, we
+// diffusion-inpaint instead so textured backgrounds reconstruct.
+function eraseRect(
+  ctx: SKRSContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  sampleRing: (bbox: Bbox) => string | null,
+  bboxForSample: Bbox
+): void {
+  if (w <= 0 || h <= 0) return;
+  const color = sampleRing(bboxForSample);
+  if (color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+  } else {
+    const region = ctx.getImageData(x, y, w, h);
+    const mask = new Uint8Array(w * h).fill(1);
+    for (let xx = 0; xx < w; xx++) {
+      mask[xx] = 0;
+      mask[(h - 1) * w + xx] = 0;
+    }
+    for (let yy = 0; yy < h; yy++) {
+      mask[yy * w] = 0;
+      mask[yy * w + (w - 1)] = 0;
+    }
+    diffusionFill(region.data, mask, w, h);
+    ctx.putImageData(region, x, y);
+  }
+}
+
+function eraseShape(
+  ctx: SKRSContext2D,
+  sh: Shape,
+  W: number,
+  H: number,
+  sampleRing: (bbox: Bbox) => string | null
+): void {
+  const stroke = Math.max(1, (sh.strokeWidth / 720) * H);
+  const bx = sh.bbox.x * W;
+  const by = sh.bbox.y * H;
+  const bw = sh.bbox.w * W;
+  const bh = sh.bbox.h * H;
+
+  // A rect that is large relative to the slide is a PANEL holding other content
+  // (text/illustrations). We must NOT erase its interior or we destroy that
+  // content; the repainted editable shape sits behind everything and its fill
+  // is visually identical to the background we'd leave anyway. So for any rect
+  // (filled or outlined) we only erase the thin BORDER bands to avoid doubling
+  // the stroke. Small solid rects (chips) still get a full erase.
+  const isLargePanel =
+    sh.kind === "rect" && (sh.bbox.w > 0.25 || sh.bbox.h > 0.25);
+  const bordersOnly =
+    sh.kind === "rect" && (isLargePanel || (!sh.fill && !!sh.stroke));
+  if (sh.kind === "line" || bordersOnly) {
+    const band = stroke + Math.max(3, stroke); // generous to catch glow/AA
+    if (sh.kind === "rect") {
+      // top, bottom, left, right bands around the frame
+      const segs: Array<[number, number, number, number, Bbox]> = [
+        [bx - band, by - band, bw + band * 2, band * 2, { x: sh.bbox.x, y: sh.bbox.y - 0.02, w: sh.bbox.w, h: 0.02 }],
+        [bx - band, by + bh - band, bw + band * 2, band * 2, { x: sh.bbox.x, y: sh.bbox.y + sh.bbox.h, w: sh.bbox.w, h: 0.02 }],
+        [bx - band, by - band, band * 2, bh + band * 2, { x: sh.bbox.x - 0.02, y: sh.bbox.y, w: 0.02, h: sh.bbox.h }],
+        [bx + bw - band, by - band, band * 2, bh + band * 2, { x: sh.bbox.x + sh.bbox.w, y: sh.bbox.y, w: 0.02, h: sh.bbox.h }],
+      ];
+      for (const [sx, sy, sw, sh2, ring] of segs) {
+        const x = Math.max(0, Math.floor(sx));
+        const y = Math.max(0, Math.floor(sy));
+        const ww = Math.min(W - x, Math.ceil(sw));
+        const hh = Math.min(H - y, Math.ceil(sh2));
+        eraseRect(ctx, x, y, ww, hh, sampleRing, ring);
+      }
+    } else {
+      // A line: erase a band along its bbox (bbox is already thin in one axis).
+      const pad = band;
+      const x = Math.max(0, Math.floor(bx - pad));
+      const y = Math.max(0, Math.floor(by - pad));
+      const ww = Math.min(W - x, Math.ceil(bw + pad * 2));
+      const hh = Math.min(H - y, Math.ceil(bh + pad * 2));
+      eraseRect(ctx, x, y, ww, hh, sampleRing, sh.bbox);
+    }
+    return;
+  }
+
+  // Filled rect/panel: erase the whole region (plus margin).
+  const pad = Math.max(2, stroke + Math.min(bw, bh) * 0.04);
+  const x = Math.max(0, Math.floor(bx - pad));
+  const y = Math.max(0, Math.floor(by - pad));
+  const w = Math.min(W - x, Math.ceil(bw + pad * 2));
+  const h = Math.min(H - y, Math.ceil(bh + pad * 2));
+  eraseRect(ctx, x, y, w, h, sampleRing, sh.bbox);
+}
+
 // ---------- main entry ----------
 
 export async function cleanBackground(
   backgroundDataUrl: string,
-  blocks: TextBlock[]
+  blocks: TextBlock[],
+  shapes: Shape[] = []
 ): Promise<{ background: string; blocks: TextBlock[] }> {
-  if (!backgroundDataUrl.startsWith("data:") || blocks.length === 0) {
+  if (!backgroundDataUrl.startsWith("data:") || (blocks.length === 0 && shapes.length === 0)) {
     return { background: backgroundDataUrl, blocks };
   }
   let img;
@@ -331,6 +427,13 @@ export async function cleanBackground(
     }
     return dominantColor(out);
   };
+
+  // 0. Erase detected shapes from the background so they become editable
+  //    overlays without doubling. Fill each shape's region from the color just
+  //    outside it (so panels/dividers vanish into the surrounding background).
+  for (const sh of shapes) {
+    eraseShape(ctx, sh, W, H, sampleRing);
+  }
 
   // Process containers first (they erase larger regions), then plain text.
   const withContainer = blocks.filter((b) => b.container);

@@ -52,6 +52,23 @@ export type ImageElement = {
   label?: string; // short description from vision (e.g. "robot mascot")
 };
 
+// A geometric vector shape (rectangle, divider line, panel outline) lifted off
+// the flattened background into an editable overlay object. The user can move,
+// resize, recolor, or delete it; export renders it as a real shape.
+export type Shape = {
+  id: string;
+  kind: "rect" | "line";
+  bbox: Bbox; // for "line", treat as the bounding box of the segment
+  fill: string | null; // interior color, null = transparent (outline/line only)
+  stroke: string | null; // border / line color
+  strokeWidth: number; // px on a 720px-tall slide; 0 = none
+  radius: number; // corner radius px (rect only)
+  // For lines: which diagonal of the bbox the segment runs along.
+  // "h" horizontal, "v" vertical, "d1" top-left→bottom-right, "d2" top-right→bottom-left.
+  orientation?: "h" | "v" | "d1" | "d2";
+  label?: string;
+};
+
 export type Slide = {
   id: string;
   index: number;
@@ -67,6 +84,8 @@ export type Slide = {
   textBlocks: TextBlock[];
   // Removable non-text graphic regions detected by vision.
   imageElements?: ImageElement[];
+  // Editable geometric shapes lifted off the background.
+  shapes?: Shape[];
   // Raw text harvested directly from the source (if any), used as a hint
   // and as a fallback when vision is unavailable.
   sourceText?: string;

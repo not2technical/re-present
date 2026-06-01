@@ -33,6 +33,46 @@ export async function exportPptx(deck: Deck): Promise<Buffer> {
       s.addImage({ data: slide.background, x: 0, y: 0, w, h });
     }
 
+    // Editable shapes (drawn above background, below text).
+    for (const shape of slide.shapes ?? []) {
+      const sx = shape.bbox.x * w;
+      const sy = shape.bbox.y * h;
+      const sw = shape.bbox.w * w;
+      const sh2 = shape.bbox.h * h;
+      const lineW = (shape.strokeWidth / 720) * (h * 72); // pt
+      if (shape.kind === "line") {
+        // Represent the line by the appropriate diagonal/edge of the bbox.
+        let flipV = false;
+        if (shape.orientation === "d2") flipV = true;
+        s.addShape("line", {
+          x: sx,
+          y: sy,
+          w: Math.max(sw, 0.01),
+          h: Math.max(sh2, 0.01),
+          line: {
+            color: (shape.stroke || "#444444").replace("#", ""),
+            width: Math.max(0.5, lineW),
+          },
+          flipV,
+        });
+      } else {
+        s.addShape("roundRect", {
+          x: sx,
+          y: sy,
+          w: Math.max(sw, 0.05),
+          h: Math.max(sh2, 0.05),
+          fill: shape.fill
+            ? { color: shape.fill.replace("#", "") }
+            : { type: "none" },
+          line:
+            shape.stroke && shape.strokeWidth > 0
+              ? { color: shape.stroke.replace("#", ""), width: Math.max(0.5, lineW) }
+              : { type: "none" },
+          rectRadius: (shape.radius / 720) * h, // inches
+        });
+      }
+    }
+
     for (const block of slide.textBlocks) {
       const x = block.bbox.x * w;
       const y = block.bbox.y * h;
