@@ -16,28 +16,58 @@ function toHex({ r, g, b }: RGB): string {
   return `#${h(r)}${h(g)}${h(b)}`;
 }
 
-// Decide whether the sampled ring is uniform enough to treat as a solid fill.
-// If the background is a photo/gradient, variance will be high and we skip
-// filling (leaving the original image visible behind transparent text).
-function uniformColor(samples: RGB[]): string | null {
-  if (samples.length === 0) return null;
-  const mean = samples.reduce(
+function dist2(a: RGB, b: RGB): number {
+  return (a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2;
+}
+
+// Find the dominant background color of a ring of samples, robust to a
+// minority of "outlier" pixels from decorative lines, borders, or grid
+// graphics that cross the ring. We greedily cluster samples by color
+// proximity and take the largest cluster. The region is treated as a solid
+// background ONLY if that cluster covers a strong majority of the ring AND is
+// itself tight — otherwise it's a photo/gradient and we leave it untouched.
+function dominantColor(samples: RGB[]): string | null {
+  if (samples.length < 6) return null;
+
+  const TOL2 = 36 * 36; // colors within ~36/channel are "the same" background
+  const clusters: { center: RGB; members: RGB[] }[] = [];
+  for (const s of samples) {
+    let best: (typeof clusters)[number] | null = null;
+    let bestD = Infinity;
+    for (const c of clusters) {
+      const d = dist2(s, c.center);
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    if (best && bestD <= TOL2) {
+      best.members.push(s);
+      // running mean
+      const n = best.members.length;
+      best.center = {
+        r: best.center.r + (s.r - best.center.r) / n,
+        g: best.center.g + (s.g - best.center.g) / n,
+        b: best.center.b + (s.b - best.center.b) / n,
+      };
+    } else {
+      clusters.push({ center: { ...s }, members: [s] });
+    }
+  }
+
+  clusters.sort((a, b) => b.members.length - a.members.length);
+  const top = clusters[0];
+  const share = top.members.length / samples.length;
+  // Require the dominant color to own a clear majority of the ring.
+  if (share < 0.6) return null;
+
+  // Average the dominant cluster's members for a clean fill color.
+  const m = top.members.reduce(
     (a, s) => ({ r: a.r + s.r, g: a.g + s.g, b: a.b + s.b }),
     { r: 0, g: 0, b: 0 }
   );
-  mean.r /= samples.length;
-  mean.g /= samples.length;
-  mean.b /= samples.length;
-
-  let variance = 0;
-  for (const s of samples) {
-    variance +=
-      (s.r - mean.r) ** 2 + (s.g - mean.g) ** 2 + (s.b - mean.b) ** 2;
-  }
-  variance /= samples.length;
-  // Std-dev threshold (~28 per channel). Above this, background isn't solid.
-  if (Math.sqrt(variance) > 48) return null;
-  return toHex(mean);
+  const n = top.members.length;
+  return toHex({ r: m.r / n, g: m.g / n, b: m.b / n });
 }
 
 function ringPoints(
@@ -106,7 +136,7 @@ export async function cleanBackground(
       if (d[3] === 0) continue;
       out.push({ r: d[0], g: d[1], b: d[2] });
     }
-    return uniformColor(out);
+    return dominantColor(out);
   };
 
   // Paint over each block region with the sampled solid color.
@@ -114,11 +144,13 @@ export async function cleanBackground(
     const solid = b.fill ?? sampleRing(b.bbox);
     if (!solid) continue; // non-uniform background -> leave original pixels
     // Expand the painted rect to fully cover original glyphs that may extend
-    // past the model's tight bbox. Large text needs more headroom (ascenders/
-    // descenders and bbox underestimation grow with font size).
+    // past the model's tight bbox. Large text needs more headroom (the model
+    // tends to underestimate height, and ascenders/descenders grow with font
+    // size). Because the fill is the sampled local background color, generous
+    // padding does not create a visible rectangle on uniform regions.
     const fontPx = (b.fontSize / 720) * H;
-    const padX = b.bbox.w * W * 0.06 + fontPx * 0.15 + 3;
-    const padY = b.bbox.h * H * 0.25 + fontPx * 0.35 + 3;
+    const padX = b.bbox.w * W * 0.06 + fontPx * 0.25 + 3;
+    const padY = Math.max(b.bbox.h * H * 0.35, fontPx * 0.7) + 3;
     const x = Math.max(0, b.bbox.x * W - padX);
     const y = Math.max(0, b.bbox.y * H - padY);
     const w = Math.min(W - x, b.bbox.w * W + padX * 2);
