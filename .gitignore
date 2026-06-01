@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+
+# Tooling artifacts
+.playwright-mcp/
+editor.png
+page-*.png
+
+# Local Claude project data
+.claude/
+
+# Large example inputs (kept locally, not committed)
+Example Docs/
+
+# Node / Next (app/.gitignore covers the rest)
+node_modules/
+.env
+.env.local
+.next/
+
+# Next build output anywhere
+**/.next/
